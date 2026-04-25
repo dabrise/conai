@@ -1,0 +1,10 @@
+Setup (one-time):
+
+Install Ollama and run ollama pull llama3.1:8b (or any model)
+Ollama runs at http://localhost:11434 automatically
+In the app:
+
+Go to Models tab → scroll to Custom / Local Models
+Click "+ Add Local Model"
+Fill in: name, model ID (e.g. llama3.1:8b), endpoint URL
+Select it — requests route through our Express proxy to avoid CORS
