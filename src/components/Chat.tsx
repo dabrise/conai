@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Send, Square, Trash2, Bot, User, Info, Play, Mic, Volume2, ChevronDown, ChevronRight } from 'lucide-react';
-import type { Message, Scenario, VoiceConfig } from '../types';
+import { Send, Square, Trash2, Bot, User, Info, Play, Mic, Volume2, AudioLines, ChevronDown, ChevronRight } from 'lucide-react';
+import type { Message, Scenario, VoiceConfig, SavedSession } from '../types';
 import { AVAILABLE_VOICES } from '../hooks/useTextToSpeech';
+import { useRealtimeSession, REALTIME_VOICES } from '../hooks/useRealtimeSession';
 
 interface ChatProps {
   messages: Message[];
@@ -29,6 +30,14 @@ interface ChatProps {
   // Voice config
   voiceConfig?: VoiceConfig;
   onVoiceConfigChange?: (config: VoiceConfig) => void;
+  // Engine + realtime
+  voiceEngine: 'cascade' | 'realtime';
+  realtimeModel: string;
+  realtimeVoice: string;
+  compiledPrompt: string;
+  language: 'en' | 'sv';
+  agentMode: string;
+  onSaveSession: (session: SavedSession) => void;
 }
 
 export function Chat({
@@ -39,33 +48,65 @@ export function Chat({
   voiceReady, onSpeakResponse, isSpeaking, onStopSpeaking,
   sttListening, sttTranscribing, onStartListening, onStopListening,
   voiceConfig, onVoiceConfigChange,
+  voiceEngine, realtimeModel, realtimeVoice, compiledPrompt, agentMode, onSaveSession,
 }: ChatProps) {
+  const isRealtime = voiceEngine === 'realtime';
+
   const [input, setInput] = useState('');
-  const [voiceEnabled, setVoiceEnabled] = useState(false);
+  const [voiceEnabled, setVoiceEnabled] = useState(false); // cascade
+  const [realtimeActive, setRealtimeActive] = useState(false);
   const [showScenarioBar, setShowScenarioBar] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const lastAssistantRef = useRef<string>('');
+  const realtimeStartRef = useRef<number>(0);
+
+  const realtime = useRealtimeSession({ model: realtimeModel, voice: realtimeVoice });
+
+  const displayMessages = realtimeActive ? realtime.messages : messages;
 
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [messages]);
+    if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+  }, [displayMessages]);
 
-  // Auto-speak new assistant messages when voice is enabled
+  // Cascade: auto-speak new assistant messages when voice is enabled
   useEffect(() => {
-    if (!voiceEnabled || !onSpeakResponse) return;
+    if (!voiceEnabled || !onSpeakResponse || isRealtime) return;
     const lastMsg = [...messages].reverse().find(m => m.role === 'assistant' && m.content);
     if (lastMsg && lastMsg.content && lastMsg.id !== lastAssistantRef.current && !isStreaming) {
       lastAssistantRef.current = lastMsg.id;
       onSpeakResponse(lastMsg.content);
     }
-  }, [messages, isStreaming, voiceEnabled, onSpeakResponse]);
+  }, [messages, isStreaming, voiceEnabled, onSpeakResponse, isRealtime]);
+
+  // Realtime: re-sync instructions on scenario change
+  useEffect(() => {
+    if (realtimeActive) realtime.updateInstructions(compiledPrompt);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeScenarioId]);
+
+  const saveRealtimeChat = useCallback(() => {
+    const msgs = realtime.messages;
+    if (msgs.filter(m => m.role !== 'system').length === 0) return;
+    onSaveSession({
+      id: crypto.randomUUID(),
+      type: 'chat',
+      messages: msgs,
+      startTime: realtimeStartRef.current || Date.now(),
+      endTime: Date.now(),
+      model: `realtime:${realtimeModel}`,
+      agentMode,
+    });
+  }, [realtime.messages, onSaveSession, realtimeModel, agentMode]);
 
   const handleSubmit = () => {
-    if (!input.trim() || isStreaming) return;
-    onSendMessage(input);
+    if (!input.trim()) return;
+    if (realtimeActive) {
+      realtime.sendText(input.trim());
+    } else {
+      if (isStreaming) return;
+      onSendMessage(input);
+    }
     setInput('');
     inputRef.current?.focus();
   };
@@ -78,25 +119,52 @@ export function Chat({
   };
 
   const activeScenario = scenarios.find(s => s.id === activeScenarioId);
-  const voiceAvailable = voiceReady;
 
-  // Voice toggle: controls both listening (STT) and speaking (TTS)
+  // Voice toggle — branches on engine
   const handleVoiceToggle = useCallback(() => {
+    if (isRealtime) {
+      if (realtimeActive) {
+        saveRealtimeChat();
+        realtime.stop();
+        setRealtimeActive(false);
+      } else {
+        realtimeStartRef.current = Date.now();
+        setRealtimeActive(true);
+        realtime.start({ instructions: compiledPrompt });
+      }
+      return;
+    }
+    // Cascade
     if (voiceEnabled) {
-      // Turn off: stop listening and speaking
       onStopListening?.();
       if (isSpeaking) onStopSpeaking?.();
       setVoiceEnabled(false);
     } else {
-      // Turn on: start listening
       setVoiceEnabled(true);
       onStartListening?.((text: string) => {
-        if (text.trim()) {
-          onSendMessage(text.trim());
-        }
+        if (text.trim()) onSendMessage(text.trim());
       });
     }
-  }, [voiceEnabled, onStartListening, onStopListening, onSendMessage, isSpeaking, onStopSpeaking]);
+  }, [isRealtime, realtimeActive, realtime, compiledPrompt, saveRealtimeChat,
+      voiceEnabled, onStartListening, onStopListening, onSendMessage, isSpeaking, onStopSpeaking]);
+
+  // Fire trigger — inject into whichever engine is live
+  const fireTrigger = useCallback((scenarioId: string, triggerId: string) => {
+    if (realtimeActive) {
+      const sc = scenarios.find(s => s.id === scenarioId);
+      const tr = sc?.triggers.find(t => t.id === triggerId);
+      if (tr) realtime.injectEvent(`[SCENARIO EVENT: ${tr.label}]\n${tr.prompt}`);
+    } else {
+      onFireTrigger(scenarioId, triggerId);
+    }
+  }, [realtimeActive, realtime, scenarios, onFireTrigger]);
+
+  const voiceBusy = realtimeActive
+    ? (realtime.state === 'connecting' ? 'Connecting…'
+      : realtime.state === 'user-speaking' ? 'Listening…'
+      : realtime.state === 'speaking' ? 'AINA speaking…'
+      : 'Live')
+    : (sttListening ? 'Listening...' : 'Voice On');
 
   return (
     <div className="flex flex-col h-full">
@@ -106,60 +174,60 @@ export function Chat({
           <Bot className="w-4 h-4 text-accent" />
           <span className="text-xs font-semibold text-text-primary">AINA Chat</span>
           <span className="text-[10px] text-text-muted">
-            {messages.filter(m => m.role !== 'system').length} messages
+            {displayMessages.filter(m => m.role !== 'system').length} messages
           </span>
+          {isRealtime && (
+            <span className="text-[9px] px-1.5 py-0.5 rounded bg-accent/15 text-accent font-medium flex items-center gap-1">
+              <AudioLines className="w-2.5 h-2.5" /> Realtime
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {/* Voice selector + toggle */}
-          {voiceAvailable && onStartListening && (
+          {voiceReady && (
             <div className="flex items-center gap-1">
-              <select
-                value={voiceConfig?.voiceId || ''}
-                onChange={e => {
-                  const voice = AVAILABLE_VOICES.find(v => v.id === e.target.value);
-                  if (voice && voiceConfig && onVoiceConfigChange) {
-                    onVoiceConfigChange({ ...voiceConfig, voiceId: voice.id });
-                  }
-                }}
-                className="bg-bg-tertiary border border-border rounded px-1.5 py-1 text-[10px] text-text-secondary focus:outline-none focus:border-accent max-w-24"
-              >
-                {AVAILABLE_VOICES.map(v => (
-                  <option key={v.id} value={v.id}>{v.name}</option>
-                ))}
-              </select>
+              {/* Cascade shows ElevenLabs voice picker; realtime voice is set in Models tab */}
+              {!isRealtime && voiceConfig && onVoiceConfigChange && (
+                <select
+                  value={voiceConfig.voiceId}
+                  onChange={e => {
+                    const voice = AVAILABLE_VOICES.find(v => v.id === e.target.value);
+                    if (voice) onVoiceConfigChange({ ...voiceConfig, voiceId: voice.id });
+                  }}
+                  className="bg-bg-tertiary border border-border rounded px-1.5 py-1 text-[10px] text-text-secondary focus:outline-none focus:border-accent max-w-24"
+                >
+                  {AVAILABLE_VOICES.map(v => <option key={v.id} value={v.id}>{v.name}</option>)}
+                </select>
+              )}
+              {isRealtime && (
+                <span className="text-[9px] text-text-muted">
+                  {REALTIME_VOICES.find(v => v.id === realtimeVoice)?.name || realtimeVoice}
+                </span>
+              )}
               <button
                 onClick={handleVoiceToggle}
                 className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-[10px] font-medium transition-colors ${
-                  voiceEnabled
+                  (isRealtime ? realtimeActive : voiceEnabled)
                     ? 'bg-green-500/20 text-green-400 border border-green-500/30'
                     : 'text-text-muted hover:text-text-secondary'
                 }`}
               >
-                {voiceEnabled ? <Mic className="w-3 h-3" /> : <Volume2 className="w-3 h-3" />}
-                {voiceEnabled ? (sttListening ? 'Listening...' : 'Voice On') : 'Voice'}
+                {(isRealtime ? realtimeActive : voiceEnabled) ? <Mic className="w-3 h-3" /> : <Volume2 className="w-3 h-3" />}
+                {(isRealtime ? realtimeActive : voiceEnabled) ? voiceBusy : 'Voice'}
               </button>
             </div>
           )}
-          {isSpeaking && (
-            <button
-              onClick={onStopSpeaking}
-              className="flex items-center gap-1 px-2 py-1 bg-warning/20 text-warning rounded text-[10px] font-medium"
-            >
+          {isSpeaking && !isRealtime && (
+            <button onClick={onStopSpeaking} className="flex items-center gap-1 px-2 py-1 bg-warning/20 text-warning rounded text-[10px] font-medium">
               <Square className="w-3 h-3" /> Stop
             </button>
           )}
           {isStreaming && (
-            <button
-              onClick={onStopStreaming}
-              className="flex items-center gap-1 px-2 py-1 bg-danger/20 text-danger rounded text-[10px] font-medium hover:bg-danger/30"
-            >
+            <button onClick={onStopStreaming} className="flex items-center gap-1 px-2 py-1 bg-danger/20 text-danger rounded text-[10px] font-medium hover:bg-danger/30">
               <Square className="w-3 h-3" /> Stop
             </button>
           )}
-          <button
-            onClick={onClearMessages}
-            className="flex items-center gap-1 px-2 py-1 text-text-muted hover:text-text-secondary text-[10px]"
-          >
+          <button onClick={onClearMessages} className="flex items-center gap-1 px-2 py-1 text-text-muted hover:text-text-secondary text-[10px]">
             <Trash2 className="w-3 h-3" /> Clear
           </button>
         </div>
@@ -167,23 +235,33 @@ export function Chat({
 
       {/* Messages */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
-        {messages.length === 0 && (
+        {displayMessages.length === 0 && (
           <div className="flex flex-col items-center justify-center h-full text-center">
             <Bot className="w-12 h-12 text-bg-tertiary mb-3" />
-            <h3 className="text-sm font-semibold text-text-secondary mb-1">Test AINA here</h3>
+            <h3 className="text-sm font-semibold text-text-secondary mb-1">
+              {realtimeActive ? 'Realtime voice active — start speaking' : 'Test AINA here'}
+            </h3>
             <p className="text-[11px] text-text-muted mb-4 max-w-xs">
-              Type a driver question to see how the LLM responds with your current prompt configuration.
+              {realtimeActive
+                ? 'Speak naturally. Your words and AINA\'s replies will appear here.'
+                : 'Type a driver question to see how the LLM responds with your current prompt configuration.'}
             </p>
-            {!isConnected && (
+            {!isConnected && !realtimeActive && (
               <div className="flex items-center gap-2 text-[11px] text-warning bg-warning/10 px-3 py-2 rounded-lg">
                 <Info className="w-4 h-4 shrink-0" />
-                Enter your OpenRouter API key to start chatting
+                LLM not configured on the server
+              </div>
+            )}
+            {isRealtime && realtime.error && (
+              <div className="flex items-center gap-2 text-[11px] text-danger bg-danger/10 px-3 py-2 rounded-lg max-w-sm">
+                <Info className="w-4 h-4 shrink-0" />
+                {realtime.error}
               </div>
             )}
           </div>
         )}
 
-        {messages.map(msg => {
+        {displayMessages.map(msg => {
           if (msg.role === 'system') {
             return (
               <div key={msg.id} className="flex justify-center">
@@ -192,7 +270,7 @@ export function Chat({
                     <Info className="w-3 h-3 text-accent" />
                     <span className="text-[10px] font-semibold text-accent">System Event</span>
                   </div>
-                  <p className="text-[11px] text-text-secondary">{msg.content}</p>
+                  <p className="text-[11px] text-text-secondary whitespace-pre-wrap">{msg.content}</p>
                 </div>
               </div>
             );
@@ -207,13 +285,9 @@ export function Chat({
                 </div>
               )}
               <div className={`max-w-[80%] ${isUser ? 'order-first' : ''}`}>
-                <div
-                  className={`px-3 py-2 rounded-xl text-[13px] leading-relaxed ${
-                    isUser
-                      ? 'bg-accent text-white rounded-br-sm'
-                      : 'bg-bg-tertiary/60 text-text-primary rounded-bl-sm'
-                  }`}
-                >
+                <div className={`px-3 py-2 rounded-xl text-[13px] leading-relaxed ${
+                  isUser ? 'bg-accent text-white rounded-br-sm' : 'bg-bg-tertiary/60 text-text-primary rounded-bl-sm'
+                }`}>
                   {msg.content || (
                     <div className="flex items-center gap-1.5">
                       <div className="typing-dot w-1.5 h-1.5 rounded-full bg-text-muted" />
@@ -251,7 +325,6 @@ export function Chat({
 
         {showScenarioBar && (
           <div className="px-4 pb-2 space-y-1.5">
-            {/* Scenario quick-select */}
             <div className="flex flex-wrap gap-1">
               {scenarios.map(s => (
                 <button
@@ -268,13 +341,12 @@ export function Chat({
               ))}
             </div>
 
-            {/* Triggers for active scenario */}
             {activeScenario && activeScenario.triggers.length > 0 && (
               <div className="flex flex-wrap gap-1">
                 {activeScenario.triggers.map(trigger => (
                   <button
                     key={trigger.id}
-                    onClick={() => onFireTrigger(activeScenario.id, trigger.id)}
+                    onClick={() => fireTrigger(activeScenario.id, trigger.id)}
                     className="flex items-center gap-1 px-2 py-1 rounded text-[10px] bg-accent/10 text-accent hover:bg-accent/20 transition-colors"
                   >
                     <Play className="w-2.5 h-2.5" />
@@ -289,8 +361,7 @@ export function Chat({
 
       {/* Input */}
       <div className="px-4 py-3 border-t border-border shrink-0">
-        {/* Transcribing indicator */}
-        {sttTranscribing && (
+        {sttTranscribing && !isRealtime && (
           <div className="text-[10px] text-amber-400 mb-1.5 px-1">Transcribing speech...</div>
         )}
         <div className="flex items-end gap-2">
@@ -299,14 +370,19 @@ export function Chat({
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={sttListening ? 'Listening...' : isConnected ? 'Type a driver question... (Enter to send)' : 'Enter API key first...'}
-            disabled={!isConnected || isStreaming}
+            placeholder={
+              realtimeActive ? 'Speak, or type to send a message…'
+              : sttListening ? 'Listening...'
+              : isConnected ? 'Type a driver question... (Enter to send)'
+              : 'LLM not configured...'
+            }
+            disabled={(!isConnected && !realtimeActive) || isStreaming}
             rows={1}
             className="flex-1 bg-bg-tertiary/40 border border-border rounded-xl px-4 py-2.5 text-sm text-text-primary resize-none focus:outline-none focus:border-accent placeholder:text-text-muted disabled:opacity-50 max-h-32"
           />
           <button
             onClick={handleSubmit}
-            disabled={!input.trim() || isStreaming || !isConnected}
+            disabled={!input.trim() || (!realtimeActive && (isStreaming || !isConnected))}
             className="p-2.5 bg-accent text-white rounded-xl hover:bg-accent-hover disabled:opacity-30 disabled:cursor-not-allowed transition-colors shrink-0"
           >
             <Send className="w-4 h-4" />

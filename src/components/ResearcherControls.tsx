@@ -22,6 +22,8 @@ interface ResearcherControlsProps {
   onEditAndApprove: (text: string) => void;
   onSendManual: (text: string) => void;
   onEndSession: () => void;
+  /** When true (Realtime engine), hides the mode selector + approve/manual panels. */
+  lockedHandsFree?: boolean;
 }
 
 const modeConfig = {
@@ -61,7 +63,7 @@ export function ResearcherControls({
   sessionState, pendingResponse, sessionStart, messageCount,
   scenarios, activeScenarioId, onActivateScenario, onFireTrigger,
   onApprove, onReject, onEditAndApprove, onSendManual,
-  onEndSession,
+  onEndSession, lockedHandsFree = false,
 }: ResearcherControlsProps) {
   const [manualText, setManualText] = useState('');
   const [editText, setEditText] = useState('');
@@ -101,30 +103,40 @@ export function ResearcherControls({
 
       <div className="flex-1 p-4 space-y-4 overflow-y-auto">
         {/* Mode Selector */}
-        <div>
-          <div className="text-xs font-semibold text-text-primary mb-2">Interaction Mode</div>
-          <div className="space-y-1.5">
-            {(Object.entries(modeConfig) as [LiveSessionMode, typeof modeConfig['hands-free']][]).map(([id, cfg]) => {
-              const Icon = cfg.icon;
-              const isActive = mode === id;
-              return (
-                <button
-                  key={id}
-                  onClick={() => onModeChange(id)}
-                  className={`w-full flex items-center gap-3 p-2.5 rounded-lg border text-left transition-all ${
-                    isActive ? cfg.bg : 'border-border hover:border-bg-hover'
-                  }`}
-                >
-                  <Icon className={`w-5 h-5 shrink-0 ${isActive ? cfg.color : 'text-text-muted'}`} />
-                  <div>
-                    <div className={`text-xs font-medium ${isActive ? cfg.color : 'text-text-secondary'}`}>{cfg.label}</div>
-                    <div className="text-[10px] text-text-muted">{cfg.desc}</div>
-                  </div>
-                </button>
-              );
-            })}
+        {lockedHandsFree ? (
+          <div className="flex items-center gap-3 p-2.5 rounded-lg border border-green-500/30 bg-green-500/10">
+            <Ear className="w-5 h-5 shrink-0 text-green-400" />
+            <div>
+              <div className="text-xs font-medium text-green-400">Hands-Free (Realtime)</div>
+              <div className="text-[10px] text-text-muted">Speech-to-speech — Approve/Manual not available</div>
+            </div>
           </div>
-        </div>
+        ) : (
+          <div>
+            <div className="text-xs font-semibold text-text-primary mb-2">Interaction Mode</div>
+            <div className="space-y-1.5">
+              {(Object.entries(modeConfig) as [LiveSessionMode, typeof modeConfig['hands-free']][]).map(([id, cfg]) => {
+                const Icon = cfg.icon;
+                const isActive = mode === id;
+                return (
+                  <button
+                    key={id}
+                    onClick={() => onModeChange(id)}
+                    className={`w-full flex items-center gap-3 p-2.5 rounded-lg border text-left transition-all ${
+                      isActive ? cfg.bg : 'border-border hover:border-bg-hover'
+                    }`}
+                  >
+                    <Icon className={`w-5 h-5 shrink-0 ${isActive ? cfg.color : 'text-text-muted'}`} />
+                    <div>
+                      <div className={`text-xs font-medium ${isActive ? cfg.color : 'text-text-secondary'}`}>{cfg.label}</div>
+                      <div className="text-[10px] text-text-muted">{cfg.desc}</div>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* Approve mode: pending response panel */}
         {mode === 'approve' && sessionState === 'awaiting-approval' && pendingResponse && (

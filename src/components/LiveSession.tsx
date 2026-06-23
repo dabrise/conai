@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Bot, User, Info, Mic, MicOff, Volume2, Settings2 } from 'lucide-react';
-import type { LiveSessionMode, Scenario, LLMParams, VoiceConfig, SavedSession } from '../types';
+import { Bot, User, Info, Mic, MicOff, Volume2, Settings2, AudioLines } from 'lucide-react';
+import type { LiveSessionMode, LiveSessionState, Scenario, LLMParams, VoiceConfig, SavedSession } from '../types';
 import { useLiveSession } from '../hooks/useLiveSession';
 import { useSpeechToText } from '../hooks/useSpeechToText';
 import { useTextToSpeech, AVAILABLE_VOICES } from '../hooks/useTextToSpeech';
+import { useRealtimeSession, REALTIME_VOICES, type RealtimeState } from '../hooks/useRealtimeSession';
 import { VoiceIndicator } from './VoiceIndicator';
 import { ResearcherControls } from './ResearcherControls';
 
@@ -21,50 +22,74 @@ interface LiveSessionProps {
   language: 'en' | 'sv';
   voiceConfig: VoiceConfig;
   introMessage: string;
+  voiceEngine: 'cascade' | 'realtime';
+  realtimeModel: string;
+  realtimeVoice: string;
+  realtimeReady: boolean;
+}
+
+// Map realtime state to the shared VoiceIndicator states
+function realtimeToIndicator(s: RealtimeState): LiveSessionState {
+  switch (s) {
+    case 'listening': return 'listening';
+    case 'user-speaking': return 'listening';
+    case 'connecting': return 'processing';
+    case 'thinking': return 'processing';
+    case 'speaking': return 'responding';
+    default: return 'idle';
+  }
 }
 
 export function LiveSession({
   selectedModel, compiledPrompt, params,
   scenarios, activeScenarioId, onActivateScenario, onScenariosChange,
   onEndSession, onSaveSession, agentMode, language, voiceConfig: sharedVoiceConfig, introMessage,
+  voiceEngine, realtimeModel, realtimeVoice, realtimeReady,
 }: LiveSessionProps) {
+  const isRealtime = voiceEngine === 'realtime';
+
   const [participantNumber, setParticipantNumber] = useState('');
   const [sessionStarted, setSessionStarted] = useState(false);
   const [mode, setMode] = useState<LiveSessionMode>('hands-free');
   const [showVoiceSettings, setShowVoiceSettings] = useState(false);
   const [micEnabled, setMicEnabled] = useState(true);
+  const [liveStartTime, setLiveStartTime] = useState<number | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const session = useLiveSession({
-    model: selectedModel,
-    compiledPrompt,
-    params,
-  });
+  // Cascade engine
+  const session = useLiveSession({ model: selectedModel, compiledPrompt, params });
+  const stt = useSpeechToText({ language: language === 'sv' ? 'sv' : 'en' });
+  const tts = useTextToSpeech({ voiceConfig: sharedVoiceConfig });
 
-  const stt = useSpeechToText({
-    language: language === 'sv' ? 'sv' : 'en',
-  });
+  // Realtime engine
+  const realtime = useRealtimeSession({ model: realtimeModel, voice: realtimeVoice });
 
-  const tts = useTextToSpeech({
-    voiceConfig: sharedVoiceConfig,
-  });
+  // Unified view values
+  const displayMessages = isRealtime ? realtime.messages : session.messages;
+  const indicatorState: LiveSessionState = isRealtime
+    ? realtimeToIndicator(realtime.state)
+    : session.sessionState;
 
   // Auto-scroll
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [session.messages]);
+  }, [displayMessages]);
 
-  // Handle transcript from STT
+  // Realtime: re-sync instructions when the active scenario changes mid-session
+  useEffect(() => {
+    if (isRealtime && sessionStarted) {
+      realtime.updateInstructions(compiledPrompt);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeScenarioId]);
+
+  // Handle transcript from cascade STT
   const handleTranscript = useCallback(async (text: string) => {
     if (!text.trim()) return;
-
     try {
       if (mode === 'hands-free') {
         const response = await session.handleHandsFree(text);
-        if (response) {
-          await tts.speak(response);
-          session.setListening();
-        }
+        if (response) { await tts.speak(response); session.setListening(); }
       } else if (mode === 'approve') {
         await session.handleApprove(text);
       } else if (mode === 'manual') {
@@ -76,103 +101,97 @@ export function LiveSession({
     }
   }, [mode, session, tts]);
 
-  // Start session when participant number is confirmed
+  // Start session
   const beginSession = useCallback(() => {
     if (!participantNumber.trim()) return;
     setSessionStarted(true);
+    setLiveStartTime(Date.now());
+
+    if (isRealtime) {
+      realtime.start({ instructions: compiledPrompt, greeting: introMessage });
+      return;
+    }
+
+    // Cascade
     session.startSession();
-    const intro = introMessage;
     session.injectEvent(`Session started. Participant: P${participantNumber}. AINA introduction playing.`);
-    tts.speak(intro).then(() => {
+    tts.speak(introMessage).then(() => {
       session.setListening();
-      if (micEnabled) {
-        stt.startListening(handleTranscript);
-      }
+      if (micEnabled) stt.startListening(handleTranscript);
     });
-  }, [participantNumber, session, tts, micEnabled, stt, handleTranscript]);
+  }, [participantNumber, isRealtime, realtime, compiledPrompt, introMessage, session, tts, micEnabled, stt, handleTranscript]);
 
   // Toggle microphone
   const toggleMic = useCallback(() => {
-    if (micEnabled) {
-      stt.stopListening();
-      setMicEnabled(false);
+    const next = !micEnabled;
+    setMicEnabled(next);
+    if (isRealtime) {
+      realtime.setMicMuted(!next);
     } else {
-      setMicEnabled(true);
-      stt.startListening(handleTranscript);
+      if (next) stt.startListening(handleTranscript);
+      else stt.stopListening();
     }
-  }, [micEnabled, stt, handleTranscript]);
+  }, [micEnabled, isRealtime, realtime, stt, handleTranscript]);
 
-  // Handle approve
+  // Cascade approve/reject/manual
   const handleApprove = useCallback(async () => {
     const text = session.approveResponse();
-    if (text) {
-      await tts.speak(text);
-      session.setListening();
-      if (micEnabled) stt.startListening(handleTranscript);
-    }
+    if (text) { await tts.speak(text); session.setListening(); if (micEnabled) stt.startListening(handleTranscript); }
   }, [session, tts, micEnabled, stt, handleTranscript]);
-
-  // Handle reject
   const handleReject = useCallback(() => {
     session.rejectResponse();
     if (micEnabled) stt.startListening(handleTranscript);
   }, [session, micEnabled, stt, handleTranscript]);
-
-  // Handle edit & approve
   const handleEditAndApprove = useCallback(async (text: string) => {
     session.editAndApprove(text);
-    await tts.speak(text);
-    session.setListening();
+    await tts.speak(text); session.setListening();
     if (micEnabled) stt.startListening(handleTranscript);
   }, [session, tts, micEnabled, stt, handleTranscript]);
-
-  // Handle manual send
   const handleSendManual = useCallback(async (text: string) => {
     session.sendManualResponse(text);
-    await tts.speak(text);
-    session.setListening();
+    await tts.speak(text); session.setListening();
     if (micEnabled) stt.startListening(handleTranscript);
   }, [session, tts, micEnabled, stt, handleTranscript]);
 
-  // Handle trigger fire
+  // Fire trigger (context injection)
   const handleFireTrigger = useCallback((scenarioId: string, triggerId: string) => {
     const scenario = scenarios.find(s => s.id === scenarioId);
     const trigger = scenario?.triggers.find(t => t.id === triggerId);
     if (!trigger) return;
-
     onScenariosChange(scenarios.map(s => {
       if (s.id !== scenarioId) return s;
       return { ...s, triggers: s.triggers.map(t => t.id === triggerId ? { ...t, fired: true } : t) };
     }));
+    const note = `[SCENARIO EVENT: ${trigger.label}]\n${trigger.prompt}`;
+    if (isRealtime) realtime.injectEvent(note);
+    else session.injectEvent(note);
+  }, [scenarios, onScenariosChange, isRealtime, realtime, session]);
 
-    session.injectEvent(`[SCENARIO EVENT: ${trigger.label}]\n${trigger.prompt}`);
-  }, [scenarios, onScenariosChange, session]);
-
-  // Handle end session - auto-save transcript
+  // End session — save transcript
   const handleEndSession = useCallback(() => {
-    stt.stopListening();
-    tts.stopSpeaking();
+    const msgs = isRealtime ? realtime.messages : session.messages;
+    if (isRealtime) realtime.stop();
+    else { stt.stopListening(); tts.stopSpeaking(); session.endSession(); }
 
-    // Save session transcript
     const saved: SavedSession = {
       id: crypto.randomUUID(),
       type: 'live',
-      participantNumber: participantNumber,
-      messages: session.messages,
-      startTime: session.sessionStart || Date.now(),
+      participantNumber,
+      messages: msgs,
+      startTime: liveStartTime || Date.now(),
       endTime: Date.now(),
-      model: selectedModel,
+      model: isRealtime ? `realtime:${realtimeModel}` : selectedModel,
       agentMode,
       activeScenario: activeScenarioId || undefined,
-      sessionMode: mode,
+      sessionMode: 'hands-free',
     };
     onSaveSession(saved);
-
-    session.endSession();
     onEndSession();
-  }, [stt, tts, session, onEndSession, onSaveSession, participantNumber, selectedModel, agentMode, activeScenarioId, mode]);
+  }, [isRealtime, realtime, session, stt, tts, participantNumber, liveStartTime, realtimeModel, selectedModel, agentMode, activeScenarioId, onSaveSession, onEndSession]);
 
-  const messageCount = session.messages.filter(m => m.role !== 'system').length;
+  const messageCount = displayMessages.filter(m => m.role !== 'system').length;
+  const realtimeVoiceName = REALTIME_VOICES.find(v => v.id === realtimeVoice)?.name || realtimeVoice;
+  const cascadeVoiceName = AVAILABLE_VOICES.find(v => v.id === sharedVoiceConfig.voiceId)?.name || 'Unknown';
 
   // Participant number gate
   if (!sessionStarted) {
@@ -182,9 +201,17 @@ export function LiveSession({
           <div className="inline-flex items-center gap-2 bg-green-900/40 px-4 py-2 rounded-xl border border-green-500/30 mb-6">
             <div className="w-2 h-2 rounded-full bg-green-500" />
             <span className="font-bold text-green-400">LIVE TEST</span>
+            <span className="text-[10px] text-text-secondary ml-1">
+              {isRealtime ? `Realtime · ${realtimeModel}` : 'Cascade'}
+            </span>
           </div>
           <h2 className="text-lg font-semibold text-text-primary mb-2">Enter Test Participant Number</h2>
           <p className="text-xs text-text-muted mb-6">Required before starting. The transcript will be saved under this number.</p>
+          {isRealtime && !realtimeReady && (
+            <div className="text-[11px] text-warning bg-warning/10 rounded-lg px-3 py-2 mb-4 max-w-xs mx-auto">
+              OpenAI key not configured on the server — Realtime won't connect. Switch to Cascade in the Models tab, or add OPENAI_KEY.
+            </div>
+          )}
           <div className="flex gap-2 max-w-xs mx-auto">
             <input
               type="text"
@@ -203,10 +230,7 @@ export function LiveSession({
               Start
             </button>
           </div>
-          <button
-            onClick={onEndSession}
-            className="mt-6 text-xs text-text-muted hover:text-text-secondary"
-          >
+          <button onClick={onEndSession} className="mt-6 text-xs text-text-muted hover:text-text-secondary">
             Cancel
           </button>
         </div>
@@ -224,11 +248,19 @@ export function LiveSession({
             <span className="font-bold text-sm text-green-400 tracking-wide">LIVE</span>
             <span className="text-xs text-text-secondary">AINA Session</span>
           </div>
-          <div className="text-[10px] text-text-muted">
-            Model: {selectedModel.split('/').pop()}
+          <div className="flex items-center gap-1.5 text-[10px] text-text-muted">
+            {isRealtime ? <AudioLines className="w-3 h-3" /> : null}
+            {isRealtime
+              ? `Realtime: ${realtimeModel} · ${realtimeVoiceName}`
+              : `Model: ${selectedModel.split('/').pop()}`}
           </div>
         </div>
         <div className="flex items-center gap-3">
+          {realtime.error && isRealtime && (
+            <span className="text-[10px] text-danger max-w-xs truncate" title={realtime.error}>
+              {realtime.error}
+            </span>
+          )}
           <button
             onClick={toggleMic}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
@@ -254,22 +286,25 @@ export function LiveSession({
       {showVoiceSettings && (
         <div className="px-5 py-2 bg-bg-secondary border-b border-border">
           <div className="text-[10px] text-text-muted">
-            Voice: <span className="text-text-secondary">{AVAILABLE_VOICES.find(v => v.id === sharedVoiceConfig.voiceId)?.name || 'Unknown'}</span>
-            <span className="ml-2 text-text-muted">(change in AINA Chat voice selector)</span>
+            {isRealtime ? (
+              <>Engine: <span className="text-text-secondary">Realtime (OpenAI)</span> · Voice: <span className="text-text-secondary">{realtimeVoiceName}</span> · Model: <span className="text-text-secondary">{realtimeModel}</span></>
+            ) : (
+              <>Engine: <span className="text-text-secondary">Cascade</span> · Voice: <span className="text-text-secondary">{cascadeVoiceName}</span> <span className="ml-1">(change in Models / Chat)</span></>
+            )}
           </div>
         </div>
       )}
 
-      {/* Main content: Researcher controls + Conversation */}
+      {/* Main content */}
       <div className="flex flex-1 overflow-hidden">
         {/* Left: Researcher Controls */}
         <div className="w-[360px] border-r border-border shrink-0 overflow-hidden">
           <ResearcherControls
             mode={mode}
             onModeChange={setMode}
-            sessionState={session.sessionState}
+            sessionState={indicatorState}
             pendingResponse={session.pendingResponse}
-            sessionStart={session.sessionStart}
+            sessionStart={liveStartTime}
             messageCount={messageCount}
             scenarios={scenarios}
             activeScenarioId={activeScenarioId}
@@ -280,19 +315,18 @@ export function LiveSession({
             onEditAndApprove={handleEditAndApprove}
             onSendManual={handleSendManual}
             onEndSession={handleEndSession}
+            lockedHandsFree={isRealtime}
           />
         </div>
 
         {/* Right: Live Conversation */}
         <div className="flex-1 flex flex-col overflow-hidden">
-          {/* Central voice indicator */}
           <div className="flex items-center justify-center py-6 border-b border-border bg-bg-secondary/50">
-            <VoiceIndicator state={session.sessionState} size="lg" />
+            <VoiceIndicator state={indicatorState} size="lg" />
           </div>
 
-          {/* Messages */}
           <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-4 space-y-3">
-            {session.messages.map(msg => {
+            {displayMessages.map(msg => {
               if (msg.role === 'system') {
                 return (
                   <div key={msg.id} className="flex justify-center">
@@ -302,7 +336,7 @@ export function LiveSession({
                         <span className="text-[10px] font-semibold text-accent">Event</span>
                         <span className="text-[9px] text-text-muted ml-auto">{new Date(msg.timestamp).toLocaleTimeString()}</span>
                       </div>
-                      <p className="text-[11px] text-text-secondary">{msg.content}</p>
+                      <p className="text-[11px] text-text-secondary whitespace-pre-wrap">{msg.content}</p>
                     </div>
                   </div>
                 );
@@ -318,9 +352,7 @@ export function LiveSession({
                   )}
                   <div className="max-w-[70%]">
                     <div className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed ${
-                      isUser
-                        ? 'bg-blue-600 text-white rounded-br-sm'
-                        : 'bg-bg-tertiary/60 text-text-primary rounded-bl-sm'
+                      isUser ? 'bg-blue-600 text-white rounded-br-sm' : 'bg-bg-tertiary/60 text-text-primary rounded-bl-sm'
                     }`}>
                       {msg.content}
                     </div>
@@ -329,7 +361,7 @@ export function LiveSession({
                         <span><Mic className="w-2.5 h-2.5 inline" /> Voice &middot; {new Date(msg.timestamp).toLocaleTimeString()}</span>
                       ) : (
                         <span>
-                          {msg.model === 'manual' ? 'Manual' : <><Volume2 className="w-2.5 h-2.5 inline" /> {msg.model?.split('/').pop()}</>}
+                          <Volume2 className="w-2.5 h-2.5 inline" /> {msg.model?.split('/').pop() || 'AINA'}
                           {' '}&middot; {new Date(msg.timestamp).toLocaleTimeString()}
                         </span>
                       )}
@@ -344,12 +376,16 @@ export function LiveSession({
               );
             })}
 
-            {/* Transcribing indicator */}
-            {stt.isTranscribing && (
+            {!isRealtime && stt.isTranscribing && (
               <div className="flex justify-end">
                 <div className="bg-blue-600/50 text-white/70 px-4 py-2 rounded-2xl rounded-br-sm text-sm italic">
                   Transcribing...
                 </div>
+              </div>
+            )}
+            {isRealtime && realtime.state === 'connecting' && (
+              <div className="flex justify-center">
+                <div className="text-[11px] text-text-muted italic">Connecting to realtime voice…</div>
               </div>
             )}
           </div>

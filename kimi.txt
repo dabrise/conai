@@ -1,0 +1,171 @@
+Great! Since you're on a RISE internal machine with direct server access, here's your step-by-step deployment guide.
+Step 0: Commit your local changes first
+Your main branch has uncommitted changes. Commit and push those to GitHub before deploying:
+bash
+Copy
+cd "C:\Users\daban\OneDrive - RISE\Daban\ConAI\LLM tester"
+
+# Stage all changes
+git add -A
+
+# Commit with a message
+git commit -m "Update: [describe what changed, e.g., voice features, UI fixes]"
+
+# Push to GitHub
+git push origin main
+If you get a "nothing to commit" message, that's fine — just push if there are any changes.
+Step 1: SSH to the server
+From your RISE machine:
+bash
+Copy
+ssh U93305@sp.se@srv-screens.sp.se
+Or try the short form if the full one doesn't work:
+bash
+Copy
+ssh srv-screens.sp.se
+Step 2: On the server — run this full deployment script
+Once you're SSH'd into srv-screens.sp.se, copy-paste this entire block and run it:
+bash
+Copy
+set -e
+
+APP_DIR="/var/www/conai"
+REPO_URL="https://github.com/dabrise/conai.git"
+
+echo "=== Step 1: Check / install Node.js ==="
+if ! command -v node &>/dev/null; then
+    echo "Node.js not found. Installing..."
+    curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+    sudo apt-get install -y nodejs
+fi
+echo "Node: $(node --version)"
+echo "npm: $(npm --version)"
+
+echo ""
+echo "=== Step 2: Ensure app directory exists ==="
+sudo mkdir -p "$APP_DIR"
+sudo chown "$(whoami):$(whoami)" "$APP_DIR"
+
+echo ""
+echo "=== Step 3: Clone or update repo ==="
+if [ -d "$APP_DIR/.git" ]; then
+    echo "Updating existing app..."
+    cd "$APP_DIR"
+    git fetch origin
+    git reset --hard origin/main
+    git clean -fd
+else
+    echo "Cloning fresh..."
+    git clone "$REPO_URL" "$APP_DIR"
+    cd "$APP_DIR"
+fi
+
+echo ""
+echo "=== Step 4: Install dependencies and build ==="
+npm ci
+npm run build
+
+echo ""
+echo "=== Step 5: Ensure data directories exist ==="
+mkdir -p "$APP_DIR/data/presets" "$APP_DIR/data/sessions"
+
+echo ""
+echo "=== Step 6: Check .env file ==="
+if [ ! -f "$APP_DIR/.env" ]; then
+    echo "Creating .env file — YOU MUST EDIT IT!"
+    cat > "$APP_DIR/.env" << 'EOF'
+# OpenRouter API key (get at https://openrouter.ai/keys)
+OPENROUTER_KEY=your-openrouter-key-here
+
+# ElevenLabs API key (get at https://elevenlabs.io/app/settings/api-keys)
+ELEVENLABS_KEY=your-elevenlabs-key-here
+
+# OpenAI API key (only needed for Realtime voice engine)
+OPENAI_KEY=your-openai-key-here
+
+# Shared password for accessing the tool
+APP_PASSWORD=change-me-to-something-secure
+
+# Random string for session cookie signing (64+ chars recommended)
+SESSION_SECRET=change-this-to-a-long-random-string-at-least-64-characters
+
+# Production mode
+NODE_ENV=production
+EOF
+    echo ""
+    echo "⚠️  IMPORTANT: Edit $APP_DIR/.env with your real API keys!"
+    echo "   Run: nano $APP_DIR/.env"
+    echo ""
+    exit 1
+fi
+
+echo ""
+echo "=== Step 7: Install PM2 if missing ==="
+if ! command -v pm2 &>/dev/null; then
+    sudo npm install -g pm2
+fi
+
+echo ""
+echo "=== Step 8: Start / restart app with PM2 ==="
+cd "$APP_DIR"
+pm2 delete conai 2>/dev/null || true
+pm2 start server.cjs --name conai --env NODE_ENV=production
+pm2 save
+
+echo ""
+echo "======================================"
+echo "✅ ConAI deployed and running!"
+echo "App dir: $APP_DIR"
+echo "Port: 3001"
+echo "======================================"
+Step 3: Set up nginx (only needed once)
+If this is the first time deploying, you need to add the nginx config. Run:
+bash
+Copy
+sudo nano /etc/nginx/sites-available/screens.ri.se
+Add this inside the server { ... } block (or create a new file if it doesn't exist):
+nginx
+Copy
+# ConAI app — static files
+location /conai/ {
+    alias /var/www/conai/dist/;
+    try_files $uri $uri/ /conai/index.html;
+    
+    location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+}
+
+# ConAI API proxy
+location /conai/api/ {
+    proxy_pass http://localhost:3001/api/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;
+    proxy_cache off;
+}
+Then test and reload nginx:
+bash
+Copy
+sudo nginx -t
+sudo nginx -s reload
+Step 4: Test
+Open https://screens.ri.se/conai in your browser and verify:
+The login page loads
+You can log in with the APP_PASSWORD from your .env
+Chat works
+For future updates (after first deploy)
+Once everything is set up, future deployments are just:
+bash
+Copy
+ssh U93305@sp.se@srv-screens.sp.se
+cd /var/www/conai
+git pull origin main
+npm ci
+npm run build
+pm2 restart conai
+Run Step 0 (commit + push) now, then SSH and run the deployment script. Let me know if you hit any errors!

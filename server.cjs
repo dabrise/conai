@@ -26,6 +26,7 @@ const DIST_DIR = path.join(__dirname, 'dist');
 // === SECRETS from .env ===
 const OPENROUTER_KEY = process.env.OPENROUTER_KEY || '';
 const ELEVENLABS_KEY = process.env.ELEVENLABS_KEY || '';
+const OPENAI_KEY = process.env.OPENAI_KEY || '';
 const APP_PASSWORD = process.env.APP_PASSWORD || '';
 const SESSION_SECRET = process.env.SESSION_SECRET || 'dev-insecure-secret';
 
@@ -76,6 +77,7 @@ app.get('/api/status', requireAuth, (req, res) => {
   res.json({
     openrouter: Boolean(OPENROUTER_KEY),
     elevenlabs: Boolean(ELEVENLABS_KEY),
+    openai: Boolean(OPENAI_KEY),
   });
 });
 
@@ -186,6 +188,53 @@ app.post('/api/tts', requireAuth, async (req, res) => {
   }
 });
 
+// === OPENAI REALTIME — mint ephemeral token (auth required) ===
+// The browser connects to OpenAI directly via WebRTC using this short-lived
+// token, so the real OPENAI_KEY never leaves the server.
+
+app.post('/api/realtime-token', requireAuth, async (req, res) => {
+  if (!OPENAI_KEY) return res.status(503).json({ error: { message: 'OpenAI not configured' } });
+
+  const { model, voice } = req.body || {};
+  if (!model) return res.status(400).json({ error: { message: 'Missing model' } });
+
+  try {
+    const response = await fetch('https://api.openai.com/v1/realtime/client_secrets', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENAI_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        session: {
+          type: 'realtime',
+          model,
+          audio: { output: { voice: voice || 'marin' } },
+        },
+      }),
+    });
+
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      console.error('[Realtime token]', response.status, JSON.stringify(data).slice(0, 300));
+      return res.status(response.status).json({
+        error: { message: data?.error?.message || `Realtime token error ${response.status}` },
+      });
+    }
+
+    // Response shape: { value: 'ek_...', expires_at, session: {...} } (or nested client_secret)
+    const value = data.value || data.client_secret?.value;
+    if (!value) {
+      return res.status(502).json({ error: { message: 'No ephemeral token returned by OpenAI' } });
+    }
+    console.log(`[Realtime token] minted for model ${model}, voice ${voice || 'marin'}`);
+    res.json({ value, model });
+  } catch (err) {
+    console.error('[Realtime token]', err.message);
+    res.status(502).json({ error: { message: err.message } });
+  }
+});
+
 // === LOCAL MODEL PROXY (auth required, SSRF-protected) ===
 
 // Only allow localhost/LAN endpoints, not arbitrary URLs
@@ -251,5 +300,6 @@ app.listen(PORT, () => {
   console.log(`  Password:   ${APP_PASSWORD ? 'configured' : 'NOT SET (open access!)'}`);
   console.log(`  OpenRouter: ${OPENROUTER_KEY ? 'configured' : 'NOT SET'}`);
   console.log(`  ElevenLabs: ${ELEVENLABS_KEY ? 'configured' : 'NOT SET'}`);
+  console.log(`  OpenAI:     ${OPENAI_KEY ? 'configured' : 'NOT SET'}`);
   console.log(`  Data dir:   ${DATA_DIR}\n`);
 });

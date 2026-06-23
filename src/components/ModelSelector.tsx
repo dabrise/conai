@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { Cloud, HardDrive, Crown, Sparkles, Leaf, Monitor, Plus, Check, X, Trash2 } from 'lucide-react';
+import { Cloud, HardDrive, Crown, Sparkles, Leaf, Monitor, Plus, Check, X, Trash2, AudioLines, Layers } from 'lucide-react';
 import { MODELS, MODEL_TIERS } from '../data/models';
+import { REALTIME_MODELS, REALTIME_VOICES } from '../hooks/useRealtimeSession';
 import type { ModelInfo } from '../types';
 
 interface ModelSelectorProps {
@@ -8,6 +9,13 @@ interface ModelSelectorProps {
   onModelChange: (model: string) => void;
   customModels: ModelInfo[];
   onCustomModelsChange: (models: ModelInfo[]) => void;
+  voiceEngine: 'cascade' | 'realtime';
+  onVoiceEngineChange: (engine: 'cascade' | 'realtime') => void;
+  realtimeModel: string;
+  onRealtimeModelChange: (model: string) => void;
+  realtimeVoice: string;
+  onRealtimeVoiceChange: (voice: string) => void;
+  realtimeReady: boolean;
 }
 
 const tierIcons = {
@@ -16,7 +24,11 @@ const tierIcons = {
   budget: Leaf,
 };
 
-export function ModelSelector({ selectedModel, onModelChange, customModels, onCustomModelsChange }: ModelSelectorProps) {
+export function ModelSelector({
+  selectedModel, onModelChange, customModels, onCustomModelsChange,
+  voiceEngine, onVoiceEngineChange, realtimeModel, onRealtimeModelChange,
+  realtimeVoice, onRealtimeVoiceChange, realtimeReady,
+}: ModelSelectorProps) {
   const [showAddForm, setShowAddForm] = useState(false);
   const [newName, setNewName] = useState('');
   const [newModelId, setNewModelId] = useState('');
@@ -96,6 +108,85 @@ export function ModelSelector({ selectedModel, onModelChange, customModels, onCu
 
   return (
     <div className="space-y-1">
+      {/* Voice Engine */}
+      <div className="mb-4 border border-border rounded-lg p-3">
+        <div className="flex items-center gap-2 mb-2">
+          <AudioLines className="w-4 h-4 text-accent" />
+          <div>
+            <div className="text-xs font-semibold text-text-primary">Voice Engine</div>
+            <div className="text-[10px] text-text-muted">How spoken conversations work</div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-1.5 mb-2">
+          <button
+            onClick={() => onVoiceEngineChange('cascade')}
+            className={`p-2 rounded-lg border text-left transition-all ${
+              voiceEngine === 'cascade' ? 'border-accent bg-accent/10' : 'border-border hover:border-bg-hover'
+            }`}
+          >
+            <div className="flex items-center gap-1.5">
+              <Layers className="w-3.5 h-3.5 text-text-secondary" />
+              <span className="text-[11px] font-semibold text-text-primary">Cascade</span>
+            </div>
+            <div className="text-[9px] text-text-muted mt-0.5 leading-tight">
+              STT → selected LLM → ElevenLabs. Works with any model above.
+            </div>
+          </button>
+          <button
+            onClick={() => onVoiceEngineChange('realtime')}
+            className={`p-2 rounded-lg border text-left transition-all ${
+              voiceEngine === 'realtime' ? 'border-accent bg-accent/10' : 'border-border hover:border-bg-hover'
+            }`}
+          >
+            <div className="flex items-center gap-1.5">
+              <AudioLines className="w-3.5 h-3.5 text-text-secondary" />
+              <span className="text-[11px] font-semibold text-text-primary">Realtime</span>
+            </div>
+            <div className="text-[9px] text-text-muted mt-0.5 leading-tight">
+              OpenAI speech-to-speech. Most fluid, but OpenAI-only.
+            </div>
+          </button>
+        </div>
+
+        {voiceEngine === 'realtime' && (
+          <div className="space-y-2 pt-1">
+            {!realtimeReady && (
+              <div className="text-[10px] text-warning bg-warning/10 rounded px-2 py-1.5">
+                OpenAI key not configured on server. Add <span className="font-mono">OPENAI_KEY</span> to <span className="font-mono">.env</span> and restart.
+              </div>
+            )}
+            <div>
+              <label className="text-[10px] text-text-muted block mb-1">Realtime model</label>
+              <select
+                value={realtimeModel}
+                onChange={e => onRealtimeModelChange(e.target.value)}
+                className="w-full bg-bg-primary border border-border rounded px-2 py-1.5 text-[11px] text-text-primary focus:outline-none focus:border-accent"
+              >
+                {REALTIME_MODELS.map(m => (
+                  <option key={m.id} value={m.id}>{m.name} — {m.desc}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="text-[10px] text-text-muted block mb-1">OpenAI voice</label>
+              <select
+                value={realtimeVoice}
+                onChange={e => onRealtimeVoiceChange(e.target.value)}
+                className="w-full bg-bg-primary border border-border rounded px-2 py-1.5 text-[11px] text-text-primary focus:outline-none focus:border-accent"
+              >
+                {REALTIME_VOICES.map(v => (
+                  <option key={v.id} value={v.id}>{v.name} — {v.desc}</option>
+                ))}
+              </select>
+            </div>
+            <div className="text-[9px] text-text-muted leading-tight">
+              Realtime ignores the OpenRouter model + ElevenLabs voice for spoken turns. Typed chat still uses the selected model below.
+            </div>
+          </div>
+        )}
+      </div>
+
       {renderModelGroup(cloudModels, <Cloud className="w-4 h-4 text-blue-400" />, 'Cloud Models', 'Hosted by providers via OpenRouter')}
       {renderModelGroup(localModels, <HardDrive className="w-4 h-4 text-green-400" />, 'Open-Weight / Local', 'Run via OpenRouter')}
 

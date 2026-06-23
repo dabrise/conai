@@ -32,7 +32,7 @@ function App() {
   }, []);
 
   // Server key status (only available once authenticated)
-  const [serverStatus, setServerStatus] = useState({ openrouter: false, elevenlabs: false });
+  const [serverStatus, setServerStatus] = useState({ openrouter: false, elevenlabs: false, openai: false });
   useEffect(() => {
     if (isAuthenticated) {
       fetch(`${import.meta.env.BASE_URL}api/status`, { credentials: 'include' }).then(r => r.json()).then(setServerStatus).catch(() => {});
@@ -63,6 +63,9 @@ function App() {
     language: 'en' as 'en' | 'sv',
     voiceConfig: DEFAULT_VOICE_CONFIG,
     customModels: [] as ModelInfo[],
+    voiceEngine: 'cascade' as 'cascade' | 'realtime',
+    realtimeModel: 'gpt-realtime',
+    realtimeVoice: 'marin',
     params: { temperature: 0.7, topP: 0.9, maxTokens: 512, frequencyPenalty: 0, presencePenalty: 0 },
   }), []);
 
@@ -92,6 +95,9 @@ function App() {
   const [language, setLanguage] = useState<'en' | 'sv'>(savedState?.language ?? DEFAULTS.language);
   const [voiceConfig, setVoiceConfig] = useState<VoiceConfig>(savedState?.voiceConfig ?? DEFAULTS.voiceConfig);
   const [customModels, setCustomModels] = useState<ModelInfo[]>(savedState?.customModels ?? DEFAULTS.customModels);
+  const [voiceEngine, setVoiceEngine] = useState<'cascade' | 'realtime'>(savedState?.voiceEngine ?? DEFAULTS.voiceEngine);
+  const [realtimeModel, setRealtimeModel] = useState(savedState?.realtimeModel ?? DEFAULTS.realtimeModel);
+  const [realtimeVoice, setRealtimeVoice] = useState(savedState?.realtimeVoice ?? DEFAULTS.realtimeVoice);
   const [params, setParams] = useState<LLMParams>(savedState?.params ?? DEFAULTS.params);
 
   // Auto-save working state to localStorage on any change
@@ -101,11 +107,13 @@ function App() {
     localStorage.setItem('conai_working_state', JSON.stringify({
       selectedModel, agentModes, agentMode, responseDepths, responseDepth,
       basePrompt, coreTasksPrompt, designPrinciples, adasModules, scenarios,
-      activeScenarioId, introEn, introSv, language, voiceConfig, customModels, params,
+      activeScenarioId, introEn, introSv, language, voiceConfig, customModels,
+      voiceEngine, realtimeModel, realtimeVoice, params,
     }));
   }, [selectedModel, agentModes, agentMode, responseDepths, responseDepth,
       basePrompt, coreTasksPrompt, designPrinciples, adasModules, scenarios,
-      activeScenarioId, introEn, introSv, language, voiceConfig, customModels, params]);
+      activeScenarioId, introEn, introSv, language, voiceConfig, customModels,
+      voiceEngine, realtimeModel, realtimeVoice, params]);
 
   // Reset to defaults
   const resetToDefaults = useCallback(() => {
@@ -125,6 +133,9 @@ function App() {
     setLanguage(DEFAULTS.language);
     setVoiceConfig(DEFAULTS.voiceConfig);
     setCustomModels(DEFAULTS.customModels);
+    setVoiceEngine(DEFAULTS.voiceEngine);
+    setRealtimeModel(DEFAULTS.realtimeModel);
+    setRealtimeVoice(DEFAULTS.realtimeVoice);
     setParams(DEFAULTS.params);
     localStorage.removeItem('conai_working_state');
   }, [DEFAULTS]);
@@ -235,7 +246,7 @@ function App() {
   }, []);
 
   const isConnected = serverStatus.openrouter;
-  const voiceReady = serverStatus.elevenlabs;
+  const voiceReady = voiceEngine === 'realtime' ? serverStatus.openai : serverStatus.elevenlabs;
 
   // --- PASSWORD GATE ---
   if (isAuthenticated === null) {
@@ -262,6 +273,10 @@ function App() {
         language={language}
         voiceConfig={voiceConfig}
         introMessage={language === 'sv' ? introSv : introEn}
+        voiceEngine={voiceEngine}
+        realtimeModel={realtimeModel}
+        realtimeVoice={realtimeVoice}
+        realtimeReady={serverStatus.openai}
       />
     );
   }
@@ -324,7 +339,19 @@ function App() {
                 />
               ),
               models: (
-                <ModelSelector selectedModel={selectedModel} onModelChange={setSelectedModel} customModels={customModels} onCustomModelsChange={setCustomModels} />
+                <ModelSelector
+                  selectedModel={selectedModel}
+                  onModelChange={setSelectedModel}
+                  customModels={customModels}
+                  onCustomModelsChange={setCustomModels}
+                  voiceEngine={voiceEngine}
+                  onVoiceEngineChange={setVoiceEngine}
+                  realtimeModel={realtimeModel}
+                  onRealtimeModelChange={setRealtimeModel}
+                  realtimeVoice={realtimeVoice}
+                  onRealtimeVoiceChange={setRealtimeVoice}
+                  realtimeReady={serverStatus.openai}
+                />
               ),
               params: (
                 <ParameterPanel params={params} onParamsChange={setParams} />
@@ -367,6 +394,13 @@ function App() {
             onStopListening={chatStt.stopListening}
             voiceConfig={voiceConfig}
             onVoiceConfigChange={setVoiceConfig}
+            voiceEngine={voiceEngine}
+            realtimeModel={realtimeModel}
+            realtimeVoice={realtimeVoice}
+            compiledPrompt={compiledPrompt}
+            language={language}
+            agentMode={agentMode}
+            onSaveSession={sessionStore.saveSession}
           />
         </div>
       </div>
