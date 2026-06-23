@@ -48,7 +48,7 @@ export function Chat({
   voiceReady, onSpeakResponse, isSpeaking, onStopSpeaking,
   sttListening, sttTranscribing, onStartListening, onStopListening,
   voiceConfig, onVoiceConfigChange,
-  voiceEngine, realtimeModel, realtimeVoice, compiledPrompt, agentMode, onSaveSession,
+  voiceEngine, realtimeModel, realtimeVoice, compiledPrompt, language, agentMode, onSaveSession,
 }: ChatProps) {
   const isRealtime = voiceEngine === 'realtime';
 
@@ -61,7 +61,7 @@ export function Chat({
   const lastAssistantRef = useRef<string>('');
   const realtimeStartRef = useRef<number>(0);
 
-  const realtime = useRealtimeSession({ model: realtimeModel, voice: realtimeVoice });
+  const realtime = useRealtimeSession({ model: realtimeModel, voice: realtimeVoice, language });
 
   const displayMessages = realtimeActive ? realtime.messages : messages;
 

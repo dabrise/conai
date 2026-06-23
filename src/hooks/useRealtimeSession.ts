@@ -36,6 +36,10 @@ export type RealtimeState =
 interface UseRealtimeOptions {
   model: string;
   voice: string;
+  /** ISO 639-1 code passed to Whisper for input transcription
+   *  ("sv", "en", …). Improves accuracy when the user is speaking a
+   *  non-English language. */
+  language?: string;
 }
 
 interface StartOptions {
@@ -44,7 +48,7 @@ interface StartOptions {
   onSystemEvent?: (text: string) => void;
 }
 
-export function useRealtimeSession({ model, voice }: UseRealtimeOptions) {
+export function useRealtimeSession({ model, voice, language }: UseRealtimeOptions) {
   const [state, setState] = useState<RealtimeState>('idle');
   const [messages, setMessages] = useState<Message[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -257,7 +261,13 @@ export function useRealtimeSession({ model, voice }: UseRealtimeOptions) {
             instructions,
             audio: {
               input: {
-                transcription: { model: 'whisper-1' },
+                transcription: {
+                  model: 'whisper-1',
+                  // Hint Whisper at the user's language. Omitted -> auto-detect
+                  // (which has been mis-flipping to English when the user speaks
+                  // Swedish; explicit 'sv' fixes it).
+                  ...(language ? { language } : {}),
+                },
                 turn_detection: { type: 'semantic_vad' },
               },
               output: { voice },
@@ -310,7 +320,7 @@ export function useRealtimeSession({ model, voice }: UseRealtimeOptions) {
       setState('error');
       stop();
     }
-  }, [model, voice, sendEvent, handleEvent, stop]);
+  }, [model, voice, language, sendEvent, handleEvent, stop]);
 
   return {
     state,

@@ -62,7 +62,7 @@ export function LiveSession({
   const tts = useTextToSpeech({ voiceConfig: sharedVoiceConfig });
 
   // Realtime engine
-  const realtime = useRealtimeSession({ model: realtimeModel, voice: realtimeVoice });
+  const realtime = useRealtimeSession({ model: realtimeModel, voice: realtimeVoice, language });
 
   // Unified view values
   const displayMessages = isRealtime ? realtime.messages : session.messages;
