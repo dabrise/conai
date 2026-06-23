@@ -3,10 +3,24 @@ const express = require('express');
 const session = require('express-session');
 const fs = require('fs');
 const path = require('path');
+const { Readable } = require('node:stream');
 
 const app = express();
 const PORT = 3001;
 const IS_PROD = process.env.NODE_ENV === 'production';
+
+// Pipe an upstream fetch() body to the Express response, regardless of whether
+// it's a Node stream (node-fetch) or a WHATWG ReadableStream (Node global fetch,
+// which has no .pipe()). This is required for streaming chat + audio.
+function pipeUpstream(upstream, res) {
+  const body = upstream.body;
+  if (!body) { res.end(); return; }
+  if (typeof body.pipe === 'function') {
+    body.pipe(res);                  // Node Readable
+  } else {
+    Readable.fromWeb(body).pipe(res); // web ReadableStream → Node Readable
+  }
+}
 
 // Behind nginx (and KEMP). Trust the X-Forwarded-Proto header so req.secure
 // reflects the original HTTPS connection — required for `secure: true` cookies.
@@ -152,7 +166,7 @@ app.post('/api/chat', requireAuth, async (req, res) => {
     res.status(response.status);
     res.setHeader('Content-Type', response.headers.get('content-type') || 'application/json');
 
-    if (req.body.stream) response.body.pipe(res);
+    if (req.body.stream) pipeUpstream(response, res);
     else res.json(await response.json());
   } catch (err) {
     console.error('[OpenRouter proxy]', err.message);
@@ -181,7 +195,7 @@ app.post('/api/tts', requireAuth, async (req, res) => {
 
     res.status(response.status);
     res.setHeader('Content-Type', response.headers.get('content-type') || 'audio/mpeg');
-    response.body.pipe(res);
+    pipeUpstream(response, res);
   } catch (err) {
     console.error('[ElevenLabs TTS]', err.message);
     res.status(502).json({ error: { message: err.message } });
@@ -275,7 +289,7 @@ app.post('/api/local-llm', requireAuth, async (req, res) => {
     res.status(response.status);
     res.setHeader('Content-Type', response.headers.get('content-type') || 'application/json');
 
-    if (body.stream) response.body.pipe(res);
+    if (body.stream) pipeUpstream(response, res);
     else res.json(await response.json());
   } catch (err) {
     console.error('[Local LLM]', err.message);
